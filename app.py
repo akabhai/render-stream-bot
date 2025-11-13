@@ -1,4 +1,4 @@
-from flask import Flask, request, send_file, render_template, abort
+from flask import Flask, request, jsonify, render_template_string
 import requests
 import os
 
@@ -8,64 +8,84 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 FILE_URL = f"https://api.telegram.org/file/bot{BOT_TOKEN}/"
 
-videos = {}  # {id: file_path}
-
-@app.route("/")
+# Homepage
+@app.route('/')
 def home():
-    return "Render Stream Bot Active!"
+    return "Render Stream Bot is live!"
 
-@app.route("/webhook", methods=["POST"])
+# Webhook endpoint
+@app.route('/webhook', methods=['POST'])
 def webhook():
     data = request.get_json()
-    if not data:
-        return "no data"
-    if "message" in data:
-        msg = data["message"]
-        chat_id = msg["chat"]["id"]
 
-        # If message has video or document
-        if "video" in msg:
-            file_id = msg["video"]["file_id"]
-        elif "document" in msg:
-            file_id = msg["document"]["file_id"]
+    if not data:
+        return jsonify({"ok": False, "error": "No JSON"}), 400
+
+    try:
+        # Get chat info
+        chat_id = data["message"]["chat"]["id"]
+
+        # Check if message has a video or document
+        file_id = None
+        if "video" in data["message"]:
+            file_id = data["message"]["video"]["file_id"]
+        elif "document" in data["message"]:
+            file_id = data["message"]["document"]["file_id"]
         else:
-            return "no video"
+            requests.post(f"{BASE_URL}/sendMessage", json={
+                "chat_id": chat_id,
+                "text": "⚠️ Please send or forward a *video* file only."
+            })
+            return jsonify({"ok": True})
 
         # Get file info from Telegram
-        file_info = requests.get(f"{BASE_URL}/getFile?file_id={file_id}").json()
+        res = requests.get(f"{BASE_URL}/getFile?file_id={file_id}")
+        file_info = res.json()
+
+        # Check response correctness
+        if "result" not in file_info:
+            requests.post(f"{BASE_URL}/sendMessage", json={
+                "chat_id": chat_id,
+                "text": f"❌ Telegram API error:\n{file_info}"
+            })
+            return jsonify({"ok": True})
+
         file_path = file_info["result"]["file_path"]
+        file_url = FILE_URL + file_path
 
-        # Store for later streaming
-        video_id = file_id[-10:]  # short id
-        videos[video_id] = file_path
+        # Generate a watch link (simple stream page)
+        stream_link = f"https://{request.host}/watch?url={file_url}"
 
-        # Send back stream link
-        stream_link = f"https://{os.getenv('RENDER_URL')}/watch?id={video_id}"
-        requests.get(f"{BASE_URL}/sendMessage", params={
+        # Send link to user
+        requests.post(f"{BASE_URL}/sendMessage", json={
             "chat_id": chat_id,
-            "text": f"🎬 Stream link:\n{stream_link}"
+            "text": f"🎬 Your stream link:\n{stream_link}"
         })
 
-    return "ok"
+    except Exception as e:
+        print("Error:", e)
+        return jsonify({"ok": False, "error": str(e)}), 500
 
-@app.route("/watch")
+    return jsonify({"ok": True})
+
+
+# Video player route
+@app.route('/watch')
 def watch():
-    video_id = request.args.get("id")
-    if not video_id or video_id not in videos:
-        return abort(404)
-    return render_template("player.html", id=video_id)
+    url = request.args.get('url', '')
+    html = f"""
+    <html>
+      <head><title>Video Stream</title></head>
+      <body style='background:#000;margin:0;'>
+        <video controls autoplay style='width:100%;height:100vh;object-fit:contain;'>
+          <source src='{url}' type='video/mp4'>
+          Your browser does not support video playback.
+        </video>
+      </body>
+    </html>
+    """
+    return render_template_string(html)
 
-@app.route("/stream/<id>")
-def stream(id):
-    if id not in videos:
-        return abort(404)
-    file_path = videos[id]
-    stream_url = FILE_URL + file_path
-    r = requests.get(stream_url, stream=True)
-    return send_file(
-        r.raw,
-        mimetype="video/mp4"
-    )
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=10000)
